@@ -101,19 +101,43 @@ class CharModel(pl.LightningModule):
           #print(f'Forward:  after fc: {x}')
         return x, hidden
     
+    def char_accuracy(self, output, target):
+      mostLikely = torch.argmax(output, dim=2)
+      #rint(f"mostLikely size: {mostLikely.size()}")
+      #print(f"target size: {target.size()}")
+      eq = mostLikely.eq(target.view_as(mostLikely))
+      #print(f"eq: {eq.size()}, {eq}")
+      #print(f"eq.sum(): {eq.sum().size()}, {eq.sum()}")
+      correct = eq.sum().item()
+      total = torch.numel(eq)
+      #print(f"correct, total: {correct}, {total}")
+      return correct, total
+
     def training_step(self, batch, batch_idx, hiddens):
         data, y = batch
         print(f"data.shape {data.shape}")
         y_hat, hiddens = self(data, hiddens)
         
-        #correct, total = char_accuracy(output, target)
+        correct, total = self.char_accuracy(y_hat, y)
 
         # yhat has dimension: batch, seq, C
         # Need batch, C, seq
         loss = F.cross_entropy(y_hat.transpose(1, 2),  y)
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, prog_bar=True)
+        self.log('train_accuracy', 100.*correct/total)
 
         return {"loss": loss, "hiddens": hiddens}
+
+    #def validation_step(self, batch, batch_idx):
+        #data, y = batch
+        #hidden = 
+        #y_hat, hidden = model(data, hidden)
+        ##c, t = char_accuracy(output, target)
+        ## yhat has dimension: batch, seq, C
+        ## Need batch, C, seq
+        #loss = F.cross_entropy(y_hat.transpose(1, 2),  y)
+        #return loss
+
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=args["lr"])
