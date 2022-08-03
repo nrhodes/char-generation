@@ -6,15 +6,12 @@ from pathlib import Path
 
 import requests
 
-url = "https://sherlock-holm.es/stories/plain-text/houn.txt"
-response = requests.get(url)
-text = response.content
 
 args = {
     # for model
     'batch_size': 512,
     'test_batch_size': 128,
-    'epochs':10,
+    'epochs':100,
     'max_seq_length': 50,
     'truncated_bptt_steps': 5,
     'lr': .001,
@@ -65,16 +62,20 @@ from torch.utils.data import Dataset
 from torch.utils.data import Sampler
 
 
-"""#Model"""
+import string
+
+# TODO: make these not be globals
+CHARS=string.printable
+NUM_CLASSES=len(CHARS)
 
 class CharModel(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, lr=.01):
         super().__init__()
         self.hidden_size = args["rnn_hidden_size"]
         self.lstm = nn.LSTM(input_size=NUM_CLASSES, hidden_size=self.hidden_size, batch_first=True)
         self.fc = nn.Linear(self.hidden_size, NUM_CLASSES) 
         self.truncated_bptt_steps = args['truncated_bptt_steps']
-
+        self.learning_rate = lr
 
     # Return the hidden tensor(s) to pass to forward
     def getNewHidden(self, batch_size):
@@ -140,9 +141,11 @@ class CharModel(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=args["lr"])
+        print('self.learning_rate', self.learning_rate)
+        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
-"""Create dataset class for our data. """
+from torch.utils.data import random_split
+from torch.utils.data import DataLoader
 
 # Break up given data into chunks of max_seq_length each.
 # TODO(neil): make this random sequences rather than fixed
@@ -162,27 +165,40 @@ class SeqDataset(Dataset):
       #print(t)
       return t[:-1], t[1:]
 
-import string
-CHARS=string.printable
-NUM_CLASSES=len(CHARS)
-print(f"text length before: {len(text)}")
-trimmedText = []
-for c in text:
-  try:
-    trimmedText.append(CHARS.index(chr(c)))
-  except:
-    pass
-print(f"text length after: {len(trimmedText)}")
-from torch.utils.data import random_split
-from torch.utils.data import DataLoader
+class HttpTextDataModule(pl.LightningDataModule): 
+    def __init__(self,
+            url = "https://sherlock-holm.es/stories/plain-text/houn.txt",
+            bs = 32):
+        super().__init__()
+        self.url = url
+        self.bs = bs
 
-dataset = SeqDataset(trimmedText)
-train_split = int(len(dataset)*.8)
-valid_split = len(dataset) - train_split
-train_ds, val_ds = random_split(dataset, [train_split, valid_split])
+    def prepare_data(self):
+        response = requests.get(self.url)
+        text = response.content
+        import string
+        print(f"text length before: {len(text)}")
+        trimmedText = []
+        for c in text:
+          try:
+            trimmedText.append(CHARS.index(chr(c)))
+          except:
+            pass
+        print(f"text length after: {len(trimmedText)}")
+        self.dataset = SeqDataset(trimmedText)
 
-train_loader = DataLoader(train_ds, batch_size=32)
-val_loader = DataLoader(val_ds, batch_size=32)
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=self.bs)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.bs)
+
+
+    def setup(self, stage = None):
+        train_split = int(len(self.dataset)*.8)
+        valid_split = len(self.dataset) - train_split
+        self.train_ds, self.val_ds = random_split(self.dataset, [train_split, valid_split])
+
 
 
 def char_accuracy(output, target):
@@ -199,12 +215,23 @@ def char_accuracy(output, target):
   
 model = CharModel()
 
+from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
 logger = TensorBoardLogger(save_dir="/data/neil/runs", name="char_generation-lightning")
 
-trainer = pl.Trainer(progress_bar_refresh_rate=1, max_epochs=2, gpus=1, logger=logger)
+lr_monitor = LearningRateMonitor(logging_interval='step')
+
+data_module = HttpTextDataModule()
+trainer = pl.Trainer(progress_bar_refresh_rate=1,
+        max_epochs=args["epochs"],
+        gpus=1,
+        logger=logger,
+        callbacks=[lr_monitor],
+        auto_lr_find=True)
+
+trainer.tune(model, datamodule=data_module)
 
 logger.log_hyperparams(args)
 
-trainer.fit(model, train_loader, val_loader)    
+trainer.fit(model, datamodule=data_module)    
