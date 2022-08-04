@@ -11,7 +11,7 @@ args = {
     # for model
     'batch_size': 512,
     'test_batch_size': 128,
-    'epochs':100,
+    'epochs':200,
     'max_seq_length': 50,
     'truncated_bptt_steps': 5,
     'lr': .001,
@@ -72,6 +72,8 @@ class CharModel(pl.LightningModule):
     def __init__(self, lr=.01):
         super().__init__()
         self.hidden_size = args["rnn_hidden_size"]
+
+        
         self.lstm = nn.LSTM(input_size=NUM_CLASSES, hidden_size=self.hidden_size, batch_first=True)
         self.fc = nn.Linear(self.hidden_size, NUM_CLASSES) 
         self.truncated_bptt_steps = args['truncated_bptt_steps']
@@ -79,8 +81,8 @@ class CharModel(pl.LightningModule):
 
     # Return the hidden tensor(s) to pass to forward
     def getNewHidden(self, batch_size):
-        return (torch.zeros(1, batch_size, self.hidden_size).to(device),
-                torch.zeros(1, batch_size, self.hidden_size).to(device))
+        return (torch.zeros(1, batch_size, self.hidden_size, device=self.device),
+                torch.zeros(1, batch_size, self.hidden_size,device=self.device))
 
     def forward(self, x, hidden):
         VERBOSE=False
@@ -129,20 +131,60 @@ class CharModel(pl.LightningModule):
 
         return {"loss": loss, "hiddens": hiddens}
 
-    #def validation_step(self, batch, batch_idx):
-        #data, y = batch
-        #hidden = 
-        #y_hat, hidden = model(data, hidden)
-        ##c, t = char_accuracy(output, target)
-        ## yhat has dimension: batch, seq, C
-        ## Need batch, C, seq
-        #loss = F.cross_entropy(y_hat.transpose(1, 2),  y)
-        #return loss
+    def validation_step(self, batch, batch_idx):
+        data, y = batch
+        hidden = self.getNewHidden(batch_size=data.shape[0])
+        y_hat, hidden = model(data, hidden)
+        c, t = self.char_accuracy(y_hat, y)
+        # yhat has dimension: batch, seq, C
+        # Need batch, C, seq
+        loss = F.cross_entropy(y_hat.transpose(1, 2),  y)
+        self.log("val_loss", loss)
+        self.log("val_accuracy", 100. * c / t)
+        if batch_idx == 0:
+            sample = self.generateUnconditionally()
+            self.logger.experiment.add_text('sample', sample, self.current_epoch)
 
+
+    def generateUnconditionally(self, prompt=args["prompt"],
+            temperature=args["temperature"],
+            output_length=args["generated_length"]):
+        VERBOSE=False
+        result = ""
+        hidden = self.getNewHidden(batch_size=1)
+        char = 0
+
+        # Not currently initializing with a prompt
+        #with torch.no_grad():
+        #for c in prompt:
+            #input=torch.reshape(torch.tensor(ord(c)), (1, 1)).to(device)
+            #_, hidden = model.forward(input, hidden)
+
+        for step in range(output_length):
+            input=torch.reshape(torch.tensor(char, device=self.device), (1, 1))
+            with torch.no_grad():
+              predictions, hidden = self.forward(input, hidden)
+            #print('predictions.shape', predictions.shape)
+            # Only use the last prediction.
+            pred = predictions[0, -1, :].cpu()
+            #print('pred', pred)
+            pred = pred/temperature;
+            #print('pred after temperature', pred)
+            newChar = torch.distributions.categorical.Categorical(logits=pred).sample()
+
+            result += CHARS[newChar.item()]
+            char = newChar
+        return result
 
     def configure_optimizers(self):
         print('self.learning_rate', self.learning_rate)
-        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        #scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            #optimizer,
+            #max_lr=self.learning_rate,
+            #total_steps=self.trainer.estimated_stepping_batches
+        #)
+        return [optimizer], []
 
 from torch.utils.data import random_split
 from torch.utils.data import DataLoader
@@ -201,18 +243,6 @@ class HttpTextDataModule(pl.LightningDataModule):
 
 
 
-def char_accuracy(output, target):
-  mostLikely = torch.argmax(output, dim=2)
-  #rint(f"mostLikely size: {mostLikely.size()}")
-  #print(f"target size: {target.size()}")
-  eq = mostLikely.eq(target.view_as(mostLikely))
-  #print(f"eq: {eq.size()}, {eq}")
-  #print(f"eq.sum(): {eq.sum().size()}, {eq.sum()}")
-  correct = eq.sum().item()
-  total = torch.numel(eq)
-  #print(f"correct, total: {correct}, {total}")
-  return correct, total
-  
 model = CharModel()
 
 from pytorch_lightning.callbacks import LearningRateMonitor
@@ -228,9 +258,10 @@ trainer = pl.Trainer(progress_bar_refresh_rate=1,
         gpus=1,
         logger=logger,
         callbacks=[lr_monitor],
-        auto_lr_find=True)
+        #auto_lr_find=True
+        )
 
-trainer.tune(model, datamodule=data_module)
+#trainer.tune(model, datamodule=data_module)
 
 logger.log_hyperparams(args)
 
